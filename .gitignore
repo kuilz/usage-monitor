@@ -9,3 +9,4 @@ dist/
 *.pid
 .claude/
 .DS_Store
+.playwright-mcp/
