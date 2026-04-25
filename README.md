@@ -17,7 +17,7 @@
 | Cache Creation Tokens | 写入 Prompt Cache 的 token 数 |
 | Cache Read Tokens | 命中 Prompt Cache 的 token 数 |
 
-其中 Cache Creation / Cache Read 依赖于上游 API 是否支持 Prompt Cache（Anthropic 支持，智谱目前不支持）。
+其中 Cache Read 在 Anthropic 和智谱的响应中均可获取。Cache Creation（缓存写入量）仅在 Anthropic 响应中返回，智谱虽然内部有缓存机制，但不在响应中暴露缓存写入数据，因此 Cache Creation 对智谱始终为 0。
 
 ### 这些指标是什么
 

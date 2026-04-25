@@ -155,17 +155,18 @@ async def _handle_streaming(
 
                     state = _ParseState.IDLE
 
-        await save_request(
-            db,
-            message_id=message_id,
-            model=model,
-            is_streaming=True,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_creation_input_tokens=cache_creation,
-            cache_read_input_tokens=cache_read,
-            stop_reason=stop_reason,
-        )
+        if input_tokens > 0 and output_tokens > 0:
+            await save_request(
+                db,
+                message_id=message_id,
+                model=model,
+                is_streaming=True,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_creation_input_tokens=cache_creation,
+                cache_read_input_tokens=cache_read,
+                stop_reason=stop_reason,
+            )
 
     return StreamingResponse(
         generate(),
