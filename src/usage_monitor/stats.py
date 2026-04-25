@@ -1,11 +1,12 @@
 import aiosqlite
+from datetime import datetime, timedelta, timezone
 
 
-async def get_summary(db: aiosqlite.Connection, days: int | None = None) -> dict:
+async def get_summary(db: aiosqlite.Connection, hours: int | None = None) -> dict:
     """Get overall and period stats."""
     where = ""
-    if days:
-        where = f"WHERE created_at >= datetime('now', '-{days} days', 'utc')"
+    if hours:
+        where = f"WHERE created_at >= datetime('now', '-{hours} hours', 'utc')"
 
     async with db.execute(
         f"""SELECT
@@ -27,35 +28,97 @@ async def get_summary(db: aiosqlite.Connection, days: int | None = None) -> dict
     }
 
 
-async def get_daily(db: aiosqlite.Connection, days: int = 30) -> list[dict]:
+async def get_usage_trend(
+    db: aiosqlite.Connection, hours: int | None = None, bucket_minutes: int = 60
+) -> list[dict]:
+    where = ""
+    if hours:
+        where = f"WHERE created_at >= datetime('now', '-{hours} hours', 'utc')"
+
+    if bucket_minutes >= 1440:
+        time_expr = "DATE(created_at)"
+    elif bucket_minutes < 60:
+        bucket = max(1, bucket_minutes)
+        time_expr = (
+            f"strftime('%Y-%m-%dT%H:', created_at) || "
+            f"printf('%02i', (CAST(strftime('%M', created_at) AS INTEGER) / {bucket}) * {bucket}) || ':00'"
+        )
+    else:
+        time_expr = "strftime('%Y-%m-%dT%H:00:00', created_at)"
+
     async with db.execute(
         f"""SELECT
-            DATE(created_at) as date,
+            {time_expr} as time_slot,
             COUNT(*) as requests,
             COALESCE(SUM(input_tokens), 0) as input_tokens,
             COALESCE(SUM(output_tokens), 0) as output_tokens
-        FROM requests
-        WHERE created_at >= datetime('now', '-{days} days', 'utc')
-        GROUP BY DATE(created_at)
-        ORDER BY date"""
+        FROM requests {where}
+        GROUP BY time_slot
+        ORDER BY time_slot"""
     ) as cursor:
         rows = await cursor.fetchall()
 
-    return [
-        {
-            "date": row["date"],
+    data = {}
+    for row in rows:
+        data[row["time_slot"]] = {
+            "time": row["time_slot"],
             "requests": row["requests"],
             "input_tokens": row["input_tokens"],
             "output_tokens": row["output_tokens"],
         }
-        for row in rows
-    ]
+
+    # Generate full time range with zero-filled gaps
+    now = datetime.now(timezone.utc)
+    if hours:
+        start = now - timedelta(hours=hours)
+    elif data:
+        first_key = min(data.keys())
+        fmt = "%Y-%m-%d" if bucket_minutes >= 1440 else "%Y-%m-%dT%H:%M:%S"
+        start = datetime.strptime(first_key[: len(first_key.rstrip("0:"))], fmt).replace(
+            tzinfo=timezone.utc
+        )
+    else:
+        start = now
+
+    if bucket_minutes >= 1440:
+        start = start.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        fmt_slot = "%Y-%m-%d"
+    elif bucket_minutes < 60:
+        start = start.replace(minute=(start.minute // bucket_minutes) * bucket_minutes, second=0, microsecond=0)
+        end = now.replace(minute=(now.minute // bucket_minutes) * bucket_minutes, second=0, microsecond=0)
+        fmt_slot = "%Y-%m-%dT%H:" + f"{0:02d}:00"  # placeholder
+    else:
+        start = start.replace(minute=0, second=0, microsecond=0)
+        end = now.replace(minute=0, second=0, microsecond=0)
+        fmt_slot = "%Y-%m-%dT%H:00:00"
+
+    result = []
+    current = start
+    delta = timedelta(minutes=bucket_minutes)
+    while current <= end:
+        if bucket_minutes >= 1440:
+            slot_str = current.strftime("%Y-%m-%d")
+        elif bucket_minutes < 60:
+            slot_str = f"{current.strftime('%Y-%m-%dT%H:')}{current.minute:02d}:00"
+        else:
+            slot_str = current.strftime("%Y-%m-%dT%H:00:00")
+
+        result.append(data.get(slot_str, {
+            "time": slot_str,
+            "requests": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+        }))
+        current += delta
+
+    return result
 
 
-async def get_by_model(db: aiosqlite.Connection, days: int | None = None) -> list[dict]:
+async def get_by_model(db: aiosqlite.Connection, hours: int | None = None) -> list[dict]:
     where = ""
-    if days:
-        where = f"WHERE created_at >= datetime('now', '-{days} days', 'utc')"
+    if hours:
+        where = f"WHERE created_at >= datetime('now', '-{hours} hours', 'utc')"
 
     async with db.execute(
         f"""SELECT

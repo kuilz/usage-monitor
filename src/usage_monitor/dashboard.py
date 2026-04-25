@@ -1,24 +1,24 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
-from .stats import get_summary, get_daily, get_by_model, get_recent
+from .stats import get_summary, get_usage_trend, get_by_model, get_recent
 
 router = APIRouter()
 
 
 @router.get("/api/stats/summary")
-async def api_summary(request: Request, days: int | None = None):
-    return await get_summary(request.app.state.db, days)
+async def api_summary(request: Request, hours: int | None = None):
+    return await get_summary(request.app.state.db, hours)
 
 
-@router.get("/api/stats/daily")
-async def api_daily(request: Request, days: int = 30):
-    return await get_daily(request.app.state.db, days)
+@router.get("/api/stats/usage")
+async def api_usage(request: Request, hours: int | None = None, bucket: int = 60):
+    return await get_usage_trend(request.app.state.db, hours, bucket)
 
 
 @router.get("/api/stats/by-model")
-async def api_by_model(request: Request, days: int | None = None):
-    return await get_by_model(request.app.state.db, days)
+async def api_by_model(request: Request, hours: int | None = None):
+    return await get_by_model(request.app.state.db, hours)
 
 
 @router.get("/api/stats/recent")
@@ -86,6 +86,14 @@ tr:hover td { background: #222; }
 }
 .badge.stream { background: #1e3a5f; color: #60a5fa; }
 .badge.sync { background: #1a3a2a; color: #4ade80; }
+.pagination { display: flex; justify-content: center; align-items: center; gap: 6px; margin-top: 12px; }
+.pagination button {
+    padding: 4px 10px; border-radius: 4px; border: 1px solid #333;
+    background: #1a1a1a; color: #aaa; cursor: pointer; font-size: 0.8rem;
+}
+.pagination button:hover:not(:disabled) { border-color: #555; }
+.pagination button.active { background: #2563eb; color: #fff; border-color: #2563eb; }
+.pagination button:disabled { opacity: 0.3; cursor: default; }
 @media (max-width: 768px) {
     .charts { grid-template-columns: 1fr; }
 }
@@ -96,10 +104,11 @@ tr:hover td { background: #222; }
 <div class="header">
     <h1>LLM Usage Monitor</h1>
     <div class="controls">
-        <button data-days="1">24h</button>
-        <button data-days="7">7d</button>
-        <button data-days="30" class="active">30d</button>
-        <button data-days="">All</button>
+        <button data-hours="1" data-bucket="5" class="active">1h</button>
+        <button data-hours="12" data-bucket="30">12h</button>
+        <button data-hours="168" data-bucket="1440">7d</button>
+        <button data-hours="720" data-bucket="1440">30d</button>
+        <button data-hours="" data-bucket="1440">All</button>
     </div>
 </div>
 
@@ -124,7 +133,7 @@ tr:hover td { background: #222; }
 
 <div class="charts">
     <div class="chart-box">
-        <h3>Daily Usage</h3>
+        <h3>Usage Trend</h3>
         <canvas id="dailyChart"></canvas>
     </div>
     <div class="chart-box">
@@ -148,11 +157,16 @@ tr:hover td { background: #222; }
         </thead>
         <tbody id="recent-body"></tbody>
     </table>
+    <div class="pagination" id="pagination"></div>
 </div>
 
 <script>
 let dailyChart, modelChart;
-let currentDays = 30;
+let currentHours = 1;
+let currentBucket = 5;
+let allRecent = [];
+let currentPage = 1;
+const PAGE_SIZE = 10;
 
 function fmt(n) {
     if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
@@ -161,24 +175,40 @@ function fmt(n) {
 }
 
 function fmtDate(iso) {
-    const d = new Date(iso + (iso.endsWith('Z') ? '' : 'Z'));
-    return d.toLocaleString();
+    const d = new Date(iso.replace(' ', 'T') + 'Z');
+    return d.toLocaleString(undefined, { hour12: false });
+}
+
+function pad2(n) { return String(n).padStart(2, '0'); }
+
+function fmtTimeLabel(timeStr, hours) {
+    const isDateOnly = !timeStr.includes('T');
+    const d = new Date(isDateOnly ? timeStr + 'T00:00:00Z' : timeStr + 'Z');
+    if (!hours || hours > 168) {
+        return pad2(d.getMonth() + 1) + '/' + pad2(d.getDate());
+    }
+    if (hours <= 24) {
+        return pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+    }
+    return pad2(d.getMonth() + 1) + '/' + pad2(d.getDate()) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
 }
 
 async function refresh() {
-    const days = currentDays || '';
-    const params = days ? `?days=${days}` : '';
+    const hours = currentHours || '';
+    const hoursParam = hours ? `?hours=${hours}` : '';
 
     // Summary
-    const summary = await (await fetch('/api/stats/summary' + params)).json();
+    const summary = await (await fetch('/api/stats/summary' + hoursParam)).json();
     document.getElementById('stat-requests').textContent = fmt(summary.total_requests);
     document.getElementById('stat-input').textContent = fmt(summary.total_input_tokens);
     document.getElementById('stat-output').textContent = fmt(summary.total_output_tokens);
     document.getElementById('stat-cache').textContent = fmt(summary.total_cache_read);
 
-    // Daily chart
-    const daily = await (await fetch('/api/stats/daily' + (days ? `?days=${days}` : '?days=30'))).json();
-    const labels = daily.map(d => d.date);
+    // Usage trend chart
+    const bucket = currentBucket || 60;
+    const usageParam = hours ? `?hours=${hours}&bucket=${bucket}` : `?bucket=${bucket}`;
+    const trend = await (await fetch('/api/stats/usage' + usageParam)).json();
+    const labels = trend.map(d => fmtTimeLabel(d.time, currentHours));
 
     if (dailyChart) dailyChart.destroy();
     dailyChart = new Chart(document.getElementById('dailyChart'), {
@@ -186,22 +216,22 @@ async function refresh() {
         data: {
             labels,
             datasets: [
-                { label: 'Input Tokens', data: daily.map(d => d.input_tokens), borderColor: '#4ade80', backgroundColor: 'rgba(74,222,128,0.1)', fill: true, tension: 0.3 },
-                { label: 'Output Tokens', data: daily.map(d => d.output_tokens), borderColor: '#c084fc', backgroundColor: 'rgba(192,132,252,0.1)', fill: true, tension: 0.3 },
+                { label: 'Input Tokens', data: trend.map(d => d.input_tokens), borderColor: '#4ade80', backgroundColor: 'rgba(74,222,128,0.1)', fill: true, tension: 0.3 },
+                { label: 'Output Tokens', data: trend.map(d => d.output_tokens), borderColor: '#c084fc', backgroundColor: 'rgba(192,132,252,0.1)', fill: true, tension: 0.3 },
             ]
         },
         options: {
             responsive: true, maintainAspectRatio: false,
             plugins: { legend: { labels: { color: '#aaa' } } },
             scales: {
-                x: { ticks: { color: '#666', maxTicksLimit: 10 }, grid: { color: '#1f1f1f' } },
+                x: { ticks: { color: '#666', maxTicksLimit: 12 }, grid: { color: '#1f1f1f' } },
                 y: { ticks: { color: '#666', callback: v => fmt(v) }, grid: { color: '#1f1f1f' } }
             }
         }
     });
 
     // Model chart
-    const models = await (await fetch('/api/stats/by-model' + params)).json();
+    const models = await (await fetch('/api/stats/by-model' + hoursParam)).json();
     const modelLabels = models.map(m => m.model.replace('claude-', '').replace(/-[0-9]{8}$/, ''));
     const modelColors = ['#60a5fa', '#4ade80', '#c084fc', '#fbbf24', '#f87171', '#fb923c'];
 
@@ -222,10 +252,19 @@ async function refresh() {
         }
     });
 
-    // Recent table
-    const recent = await (await fetch('/api/stats/recent?limit=50')).json();
+    // Recent table with pagination
+    allRecent = await (await fetch('/api/stats/recent?limit=50')).json();
+    currentPage = 1;
+    renderRecentTable();
+}
+
+function renderRecentTable() {
+    const totalPages = Math.ceil(allRecent.length / PAGE_SIZE);
+    const start = (currentPage - 1) * PAGE_SIZE;
+    const pageData = allRecent.slice(start, start + PAGE_SIZE);
+
     const tbody = document.getElementById('recent-body');
-    tbody.innerHTML = recent.map(r => `
+    tbody.innerHTML = pageData.map(r => `
         <tr>
             <td>${fmtDate(r.created_at)}</td>
             <td>${r.model}</td>
@@ -235,6 +274,22 @@ async function refresh() {
             <td>${r.stop_reason || '-'}</td>
         </tr>
     `).join('');
+
+    const pagination = document.getElementById('pagination');
+    if (totalPages <= 1) { pagination.innerHTML = ''; return; }
+    let html = `<button onclick="goPage(${currentPage - 1})" ${currentPage === 1 ? 'disabled' : ''}>&lt;</button>`;
+    for (let i = 1; i <= totalPages; i++) {
+        html += `<button onclick="goPage(${i})" class="${i === currentPage ? 'active' : ''}">${i}</button>`;
+    }
+    html += `<button onclick="goPage(${currentPage + 1})" ${currentPage === totalPages ? 'disabled' : ''}>&gt;</button>`;
+    pagination.innerHTML = html;
+}
+
+function goPage(page) {
+    const totalPages = Math.ceil(allRecent.length / PAGE_SIZE);
+    if (page < 1 || page > totalPages) return;
+    currentPage = page;
+    renderRecentTable();
 }
 
 // Time range buttons
@@ -242,7 +297,8 @@ document.querySelectorAll('.controls button').forEach(btn => {
     btn.addEventListener('click', () => {
         document.querySelectorAll('.controls button').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
-        currentDays = btn.dataset.days ? parseInt(btn.dataset.days) : null;
+        currentHours = btn.dataset.hours ? parseInt(btn.dataset.hours) : null;
+        currentBucket = parseInt(btn.dataset.bucket) || 60;
         refresh();
     });
 });
