@@ -51,7 +51,14 @@ Client → Local Proxy (:8080) → 上游 API (Anthropic / 智谱)
               Web Dashboard
 ```
 
-代理透明转发请求，同时从响应中提取用量信息存入本地数据库。兼容 Anthropic 和智谱的 Anthropic 兼容接口。失败的请求（input/output 均为 0）不会入库。
+代理透明转发请求，同时从响应中提取用量信息存入本地数据库。兼容 Anthropic 和智谱的 Anthropic 兼容接口。
+
+### 强制流式转发
+
+无论客户端发起的是流式还是非流式请求，代理内部都会统一转为流式请求发送到上游 API。这是因为部分上游提供商（如智谱）的非流式接口返回不准确的 token 统计数据，而流式 SSE 接口的 usage 数据是准确的。
+
+- 对客户端完全透明——非流式请求的客户端仍然收到流式 SSE 响应，客户端无需任何改动
+- 数据库中会如实记录客户端的原始请求类型（streaming / sync）
 
 ## 快速开始
 
@@ -136,9 +143,37 @@ client = anthropic.Anthropic(
 浏览器打开 `http://127.0.0.1:8080/`，查看：
 
 - **Summary Cards** — 总请求数、Input Tokens、Output Tokens、Cache 命中量
-- **Usage Trend** — Input/Output token 趋势折线图，支持 1h / 12h / 7d / 30d / All 时间范围切换，自动调整时间粒度（5分钟 / 30分钟 / 每天）
+- **Usage Trend** — Input/Output token 趋势折线图
 - **By Model** — 按模型分组的请求分布饼图
-- **Recent Requests** — 最近请求明细表，每页 10 条，支持分页浏览
+- **Recent Requests** — 最近请求明细表
+
+### 时间范围切换
+
+Dashboard 顶部提供 6 个时间范围按钮：
+
+| 按钮 | 范围 | 图表粒度 |
+|------|------|---------|
+| **1h** | 最近 1 小时 | 5 分钟 |
+| **12h** | 最近 12 小时 | 30 分钟 |
+| **Today** | 当天零点 ~ 次日零点 | 30 分钟 |
+| **7d** | 最近 7 天 | 每天 |
+| **30d** | 最近 30 天 | 每天 |
+| **All** | 全部数据 | 每天 |
+
+其中 **Today** 按钮使用绝对时间范围（当天本地零点到次日零点），适合查看当天的用量汇总。
+
+### 请求明细表
+
+Recent Requests 表格展示每次请求的详细信息，每页 10 条，支持分页浏览：
+
+| 列 | 说明 |
+|----|------|
+| Time | 请求时间 |
+| Model | 使用的模型 |
+| Input | 输入 token 数 |
+| Output | 输出 token 数 |
+| Type | 请求类型：蓝色 `stream`（流式）或绿色 `sync`（同步） |
+| Stop Reason | 停止原因（`end_turn`、`max_tokens` 等） |
 
 每 30 秒自动刷新。
 
@@ -159,14 +194,16 @@ client = anthropic.Anthropic(
 |--------|------|------|------|
 | POST | `/v1/messages` | — | 代理转发到上游 API |
 | GET | `/` | — | Web Dashboard |
-| GET | `/api/stats/summary` | `hours` (可选) | 汇总统计（请求数、Input、Output、Cache） |
-| GET | `/api/stats/usage` | `hours` (可选), `bucket` (分钟, 默认60) | 时间趋势数据，自动填充空缺时间点 |
-| GET | `/api/stats/by-model` | `hours` (可选) | 按模型统计 |
+| GET | `/api/stats/summary` | `hours` (可选), `since`/`until` (可选) | 汇总统计（请求数、Input、Output、Cache） |
+| GET | `/api/stats/usage` | `hours` (可选), `bucket` (分钟, 默认60), `since`/`until` (可选) | 时间趋势数据，自动填充空缺时间点 |
+| GET | `/api/stats/by-model` | `hours` (可选), `since`/`until` (可选) | 按模型统计 |
 | GET | `/api/stats/recent` | `limit` (默认50) | 最近请求列表 |
+
+其中 `since`/`until` 参数为 ISO 格式时间戳（如 `2026-04-26T00:00:00`），用于绝对时间范围查询。传入 `since`/`until` 时，`hours` 参数会被忽略。
 
 ## Streaming 支持
 
-完整支持 SSE 流式调用。代理使用 async generator 逐行转发 SSE 事件，零缓冲，不增加延迟。兼容 Anthropic 和智谱两种响应格式：
+代理使用 async generator 逐行转发 SSE 事件，零缓冲，不增加延迟。兼容 Anthropic 和智谱两种响应格式：
 
 - **Anthropic**: `message_start` 包含 input_tokens，`message_delta` 包含 output_tokens
 - **智谱**: 两个字段均在 `message_delta` 中返回
