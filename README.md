@@ -21,15 +21,25 @@
 
 ### 这些指标是什么
 
-**Prefill（输入处理）** — 模型收到请求后，需要先"阅读"一遍所有输入 token（system prompt + 历史 messages + 当前用户消息），这个过程叫 prefill。`input_tokens` 就是每次请求的输入 token 总数。
+**Prefill（输入处理）** — 模型收到请求后，需要先"阅读"一遍所有输入 token（system prompt + 历史 messages + 当前用户消息），这个过程叫 prefill。
 
 **Decode（输出生成）** — prefill 完成后，模型开始逐个生成回复 token。每生成一个 token 都需要做一次前向传播，因此 decode 是最耗时的阶段。`output_tokens` 是模型生成的回复 token 数。
 
-**Cache Creation（缓存写入）** — 当使用 Prompt Cache 时，系统会把输入中可缓存的部分（比如长 system prompt）存入缓存，下次请求可以复用。`cache_creation_input_tokens` 是首次写入缓存的 token 数。写入缓存有额外成本（比正常 input 贵）。
+**Cache Creation（缓存写入）** — 当使用 Prompt Cache 时，系统会把输入中可缓存的部分（比如长 system prompt）存入缓存，下次请求可以复用。`cache_creation_input_tokens` 是本次写入缓存的 token 数。写入缓存有额外成本（比正常 input 贵）。
 
 **Cache Read（缓存命中）** — 当后续请求的输入前缀与已缓存内容匹配时，可以直接从缓存读取，跳过这些 token 的 prefill 计算。`cache_read_input_tokens` 是命中缓存的 token 数，价格远低于正常 input。
 
-三者的关系：`input_tokens = cache_read_tokens + cache_creation_tokens + 需要重新 prefill 的新 token`。
+**Input Tokens** — `input_tokens` 是最后一个缓存断点之后、未被缓存覆盖的 token 数。它**不包含** cache_read 和 cache_creation 的部分。
+
+三者的关系：`input_tokens + cache_creation_input_tokens + cache_read_input_tokens = 实际总输入量`。
+
+> **Anthropic 官方定义**（[Prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)）：
+>
+> - `cache_creation_input_tokens`: Number of tokens written to the cache when creating a new entry.
+> - `cache_read_input_tokens`: Number of tokens retrieved from the cache for this request.
+> - `input_tokens`: Number of input tokens which were not read from or used to create a cache (that is, tokens after the last cache breakpoint).
+>
+> `total_input_tokens = cache_read_input_tokens + cache_creation_input_tokens + input_tokens`
 
 ## 工作原理
 
@@ -41,7 +51,7 @@ Client → Local Proxy (:8080) → 上游 API (Anthropic / 智谱)
               Web Dashboard
 ```
 
-代理透明转发请求，同时从响应中提取用量信息存入本地数据库。兼容 Anthropic 和智谱的 Anthropic 兼容接口。
+代理透明转发请求，同时从响应中提取用量信息存入本地数据库。兼容 Anthropic 和智谱的 Anthropic 兼容接口。失败的请求（input/output 均为 0）不会入库。
 
 ## 快速开始
 
@@ -54,10 +64,16 @@ cp .env.example .env
 # 编辑 .env，填入 API Key 和 Base URL
 
 # 3. 启动
-uv run uvicorn usage_monitor.main:app --reload
+bash usage-monitor.sh start
 ```
 
-服务默认运行在 `http://127.0.0.1:8080`。
+服务默认运行在 `http://127.0.0.1:8080`。也支持 `stop`、`restart`、`status` 命令：
+
+```bash
+bash usage-monitor.sh status   # 查看运行状态
+bash usage-monitor.sh restart  # 重启服务
+bash usage-monitor.sh stop     # 停止服务
+```
 
 ### 智谱配置示例
 
@@ -120,11 +136,11 @@ client = anthropic.Anthropic(
 浏览器打开 `http://127.0.0.1:8080/`，查看：
 
 - **Summary Cards** — 总请求数、Input Tokens、Output Tokens、Cache 命中量
-- **Daily Usage Chart** — 每日 input/output token 折线图
-- **By Model Chart** — 按模型分组的请求分布
-- **Recent Requests** — 最近 50 条请求明细
+- **Usage Trend** — Input/Output token 趋势折线图，支持 1h / 12h / 7d / 30d / All 时间范围切换，自动调整时间粒度（5分钟 / 30分钟 / 每天）
+- **By Model** — 按模型分组的请求分布饼图
+- **Recent Requests** — 最近请求明细表，每页 10 条，支持分页浏览
 
-支持 24h / 7d / 30d / All 时间范围切换，每 30 秒自动刷新。
+每 30 秒自动刷新。
 
 ## 配置项
 
@@ -139,14 +155,14 @@ client = anthropic.Anthropic(
 
 ## API Endpoints
 
-| Method | Path | 说明 |
-|--------|------|---------|
-| POST | `/v1/messages` | 代理转发到上游 API |
-| GET | `/` | Web Dashboard |
-| GET | `/api/stats/summary` | 汇总统计 |
-| GET | `/api/stats/daily?days=7` | 每日统计 |
-| GET | `/api/stats/by-model` | 按模型统计 |
-| GET | `/api/stats/recent?limit=50` | 最近请求列表 |
+| Method | Path | 参数 | 说明 |
+|--------|------|------|------|
+| POST | `/v1/messages` | — | 代理转发到上游 API |
+| GET | `/` | — | Web Dashboard |
+| GET | `/api/stats/summary` | `hours` (可选) | 汇总统计（请求数、Input、Output、Cache） |
+| GET | `/api/stats/usage` | `hours` (可选), `bucket` (分钟, 默认60) | 时间趋势数据，自动填充空缺时间点 |
+| GET | `/api/stats/by-model` | `hours` (可选) | 按模型统计 |
+| GET | `/api/stats/recent` | `limit` (默认50) | 最近请求列表 |
 
 ## Streaming 支持
 
