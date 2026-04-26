@@ -71,17 +71,20 @@ async def _handle_non_streaming(
     data = resp.json()
 
     usage = data.get("usage", {})
-    await save_request(
-        db,
-        message_id=data.get("id"),
-        model=data.get("model", body_json.get("model", "")),
-        is_streaming=False,
-        input_tokens=usage.get("input_tokens", 0),
-        output_tokens=usage.get("output_tokens", 0),
-        cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
-        cache_read_input_tokens=usage.get("cache_read_input_tokens", 0),
-        stop_reason=data.get("stop_reason"),
-    )
+    input_tokens = usage.get("input_tokens", 0)
+    output_tokens = usage.get("output_tokens", 0)
+    if input_tokens > 0 and output_tokens > 0:
+        await save_request(
+            db,
+            message_id=data.get("id"),
+            model=data.get("model", body_json.get("model", "")),
+            is_streaming=False,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
+            cache_read_input_tokens=usage.get("cache_read_input_tokens", 0),
+            stop_reason=data.get("stop_reason"),
+        )
 
     return Response(
         content=resp.content,
