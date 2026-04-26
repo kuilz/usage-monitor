@@ -2,10 +2,17 @@ import aiosqlite
 from datetime import datetime, timedelta, timezone
 
 
-async def get_summary(db: aiosqlite.Connection, hours: int | None = None) -> dict:
+async def get_summary(db: aiosqlite.Connection, hours: int | None = None, since: str | None = None, until: str | None = None) -> dict:
     """Get overall and period stats."""
     where = ""
-    if hours:
+    params: list = []
+    if since:
+        where = "WHERE created_at >= ?"
+        params = [since]
+        if until:
+            where += " AND created_at < ?"
+            params.append(until)
+    elif hours:
         where = f"WHERE created_at >= datetime('now', '-{hours} hours', 'utc')"
 
     async with db.execute(
@@ -15,7 +22,8 @@ async def get_summary(db: aiosqlite.Connection, hours: int | None = None) -> dic
             COALESCE(SUM(output_tokens), 0) as total_output_tokens,
             COALESCE(SUM(cache_creation_input_tokens), 0) as total_cache_creation,
             COALESCE(SUM(cache_read_input_tokens), 0) as total_cache_read
-        FROM requests {where}"""
+        FROM requests {where}""",
+        params,
     ) as cursor:
         row = await cursor.fetchone()
 
@@ -29,10 +37,21 @@ async def get_summary(db: aiosqlite.Connection, hours: int | None = None) -> dic
 
 
 async def get_usage_trend(
-    db: aiosqlite.Connection, hours: int | None = None, bucket_minutes: int = 60
+    db: aiosqlite.Connection,
+    hours: int | None = None,
+    bucket_minutes: int = 60,
+    since: str | None = None,
+    until: str | None = None,
 ) -> list[dict]:
     where = ""
-    if hours:
+    params: list = []
+    if since:
+        where = "WHERE created_at >= ?"
+        params = [since]
+        if until:
+            where += " AND created_at < ?"
+            params.append(until)
+    elif hours:
         where = f"WHERE created_at >= datetime('now', '-{hours} hours', 'utc')"
 
     if bucket_minutes >= 1440:
@@ -54,7 +73,8 @@ async def get_usage_trend(
             COALESCE(SUM(output_tokens), 0) as output_tokens
         FROM requests {where}
         GROUP BY time_slot
-        ORDER BY time_slot"""
+        ORDER BY time_slot""",
+        params,
     ) as cursor:
         rows = await cursor.fetchall()
 
@@ -69,7 +89,9 @@ async def get_usage_trend(
 
     # Generate full time range with zero-filled gaps
     now = datetime.now(timezone.utc)
-    if hours:
+    if since:
+        start = datetime.fromisoformat(since).replace(tzinfo=timezone.utc)
+    elif hours:
         start = now - timedelta(hours=hours)
     elif data:
         first_key = min(data.keys())
@@ -80,17 +102,27 @@ async def get_usage_trend(
     else:
         start = now
 
+    # Reference time for end calculation: use `until` if provided, otherwise `now`
+    ref = datetime.fromisoformat(until).replace(tzinfo=timezone.utc) if until else now
+
     if bucket_minutes >= 1440:
         start = start.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = ref.replace(hour=0, minute=0, second=0, microsecond=0)
+        if until:
+            end -= timedelta(days=1)
         fmt_slot = "%Y-%m-%d"
     elif bucket_minutes < 60:
-        start = start.replace(minute=(start.minute // bucket_minutes) * bucket_minutes, second=0, microsecond=0)
-        end = now.replace(minute=(now.minute // bucket_minutes) * bucket_minutes, second=0, microsecond=0)
+        bucket = max(1, bucket_minutes)
+        start = start.replace(minute=(start.minute // bucket) * bucket, second=0, microsecond=0)
+        end = ref.replace(minute=(ref.minute // bucket) * bucket, second=0, microsecond=0)
+        if until:
+            end -= timedelta(minutes=bucket)
         fmt_slot = "%Y-%m-%dT%H:" + f"{0:02d}:00"  # placeholder
     else:
         start = start.replace(minute=0, second=0, microsecond=0)
-        end = now.replace(minute=0, second=0, microsecond=0)
+        end = ref.replace(minute=0, second=0, microsecond=0)
+        if until:
+            end -= timedelta(hours=1)
         fmt_slot = "%Y-%m-%dT%H:00:00"
 
     result = []
@@ -115,9 +147,16 @@ async def get_usage_trend(
     return result
 
 
-async def get_by_model(db: aiosqlite.Connection, hours: int | None = None) -> list[dict]:
+async def get_by_model(db: aiosqlite.Connection, hours: int | None = None, since: str | None = None, until: str | None = None) -> list[dict]:
     where = ""
-    if hours:
+    params: list = []
+    if since:
+        where = "WHERE created_at >= ?"
+        params = [since]
+        if until:
+            where += " AND created_at < ?"
+            params.append(until)
+    elif hours:
         where = f"WHERE created_at >= datetime('now', '-{hours} hours', 'utc')"
 
     async with db.execute(
@@ -128,7 +167,8 @@ async def get_by_model(db: aiosqlite.Connection, hours: int | None = None) -> li
             COALESCE(SUM(output_tokens), 0) as output_tokens
         FROM requests {where}
         GROUP BY model
-        ORDER BY requests DESC"""
+        ORDER BY requests DESC""",
+        params,
     ) as cursor:
         rows = await cursor.fetchall()
 

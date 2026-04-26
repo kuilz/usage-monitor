@@ -30,10 +30,11 @@ class _ParseState(Enum):
 def _build_upstream_headers(request: Request) -> dict:
     headers = {}
     for key, value in request.headers.items():
-        if key.lower() in ("host", "content-length", "transfer-encoding"):
+        if key.lower() in ("host", "content-length", "transfer-encoding", "authorization", "x-api-key"):
             continue
         headers[key] = value
     headers["x-api-key"] = settings.anthropic_api_key
+    headers["authorization"] = f"Bearer {settings.anthropic_api_key}"
     return headers
 
 

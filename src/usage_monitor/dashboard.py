@@ -7,18 +7,18 @@ router = APIRouter()
 
 
 @router.get("/api/stats/summary")
-async def api_summary(request: Request, hours: int | None = None):
-    return await get_summary(request.app.state.db, hours)
+async def api_summary(request: Request, hours: int | None = None, since: str | None = None, until: str | None = None):
+    return await get_summary(request.app.state.db, hours, since, until)
 
 
 @router.get("/api/stats/usage")
-async def api_usage(request: Request, hours: int | None = None, bucket: int = 60):
-    return await get_usage_trend(request.app.state.db, hours, bucket)
+async def api_usage(request: Request, hours: int | None = None, bucket: int = 60, since: str | None = None, until: str | None = None):
+    return await get_usage_trend(request.app.state.db, hours, bucket, since, until)
 
 
 @router.get("/api/stats/by-model")
-async def api_by_model(request: Request, hours: int | None = None):
-    return await get_by_model(request.app.state.db, hours)
+async def api_by_model(request: Request, hours: int | None = None, since: str | None = None, until: str | None = None):
+    return await get_by_model(request.app.state.db, hours, since, until)
 
 
 @router.get("/api/stats/recent")
@@ -104,11 +104,12 @@ tr:hover td { background: #222; }
 <div class="header">
     <h1>LLM Usage Monitor</h1>
     <div class="controls">
-        <button data-hours="1" data-bucket="5" class="active">1h</button>
-        <button data-hours="12" data-bucket="30">12h</button>
-        <button data-hours="168" data-bucket="1440">7d</button>
-        <button data-hours="720" data-bucket="1440">30d</button>
-        <button data-hours="" data-bucket="1440">All</button>
+        <button data-hours="1" data-bucket="5" data-label="time" class="active">1h</button>
+        <button data-hours="12" data-bucket="30" data-label="time">12h</button>
+        <button data-mode="today" data-bucket="30" data-label="time">Today</button>
+        <button data-hours="168" data-bucket="1440" data-label="datetime">7d</button>
+        <button data-hours="720" data-bucket="1440" data-label="date">30d</button>
+        <button data-hours="" data-bucket="1440" data-label="date">All</button>
     </div>
 </div>
 
@@ -164,6 +165,9 @@ tr:hover td { background: #222; }
 let dailyChart, modelChart;
 let currentHours = 1;
 let currentBucket = 5;
+let currentLabel = 'time';
+let currentSince = null;
+let currentUntil = null;
 let allRecent = [];
 let currentPage = 1;
 const PAGE_SIZE = 10;
@@ -181,13 +185,13 @@ function fmtDate(iso) {
 
 function pad2(n) { return String(n).padStart(2, '0'); }
 
-function fmtTimeLabel(timeStr, hours) {
+function fmtTimeLabel(timeStr, labelFmt) {
     const isDateOnly = !timeStr.includes('T');
     const d = new Date(isDateOnly ? timeStr + 'T00:00:00Z' : timeStr + 'Z');
-    if (!hours || hours > 168) {
+    if (labelFmt === 'date') {
         return pad2(d.getMonth() + 1) + '/' + pad2(d.getDate());
     }
-    if (hours <= 24) {
+    if (labelFmt === 'time') {
         return pad2(d.getHours()) + ':' + pad2(d.getMinutes());
     }
     return pad2(d.getMonth() + 1) + '/' + pad2(d.getDate()) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
@@ -195,10 +199,15 @@ function fmtTimeLabel(timeStr, hours) {
 
 async function refresh() {
     const hours = currentHours || '';
-    const hoursParam = hours ? `?hours=${hours}` : '';
+    let params = new URLSearchParams();
+    if (currentSince) params.set('since', currentSince);
+    else if (hours) params.set('hours', hours);
+    if (currentUntil) params.set('until', currentUntil);
+    const qs = params.toString();
+    const prefix = qs ? '?' + qs : '';
 
     // Summary
-    const summary = await (await fetch('/api/stats/summary' + hoursParam)).json();
+    const summary = await (await fetch('/api/stats/summary' + prefix)).json();
     document.getElementById('stat-requests').textContent = fmt(summary.total_requests);
     document.getElementById('stat-input').textContent = fmt(summary.total_input_tokens);
     document.getElementById('stat-output').textContent = fmt(summary.total_output_tokens);
@@ -206,9 +215,13 @@ async function refresh() {
 
     // Usage trend chart
     const bucket = currentBucket || 60;
-    const usageParam = hours ? `?hours=${hours}&bucket=${bucket}` : `?bucket=${bucket}`;
-    const trend = await (await fetch('/api/stats/usage' + usageParam)).json();
-    const labels = trend.map(d => fmtTimeLabel(d.time, currentHours));
+    let usageParams = new URLSearchParams();
+    if (currentSince) usageParams.set('since', currentSince);
+    else if (hours) usageParams.set('hours', hours);
+    usageParams.set('bucket', bucket);
+    if (currentUntil) usageParams.set('until', currentUntil);
+    const trend = await (await fetch('/api/stats/usage?' + usageParams.toString())).json();
+    const labels = trend.map(d => fmtTimeLabel(d.time, currentLabel));
 
     if (dailyChart) dailyChart.destroy();
     dailyChart = new Chart(document.getElementById('dailyChart'), {
@@ -231,7 +244,7 @@ async function refresh() {
     });
 
     // Model chart
-    const models = await (await fetch('/api/stats/by-model' + hoursParam)).json();
+    const models = await (await fetch('/api/stats/by-model' + prefix)).json();
     const modelLabels = models.map(m => m.model.replace('claude-', '').replace(/-[0-9]{8}$/, ''));
     const modelColors = ['#60a5fa', '#4ade80', '#c084fc', '#fbbf24', '#f87171', '#fb923c'];
 
@@ -297,8 +310,21 @@ document.querySelectorAll('.controls button').forEach(btn => {
     btn.addEventListener('click', () => {
         document.querySelectorAll('.controls button').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
-        currentHours = btn.dataset.hours ? parseInt(btn.dataset.hours) : null;
         currentBucket = parseInt(btn.dataset.bucket) || 60;
+        currentLabel = btn.dataset.label || 'time';
+
+        if (btn.dataset.mode === 'today') {
+            const now = new Date();
+            const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+            const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+            currentSince = midnight.toISOString().slice(0, 19).replace('T', ' ');
+            currentUntil = tomorrow.toISOString().slice(0, 19).replace('T', ' ');
+            currentHours = null;
+        } else {
+            currentHours = btn.dataset.hours ? parseInt(btn.dataset.hours) : null;
+            currentSince = null;
+            currentUntil = null;
+        }
         refresh();
     });
 });
