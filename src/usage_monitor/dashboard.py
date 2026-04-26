@@ -1,7 +1,7 @@
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
-from .stats import get_summary, get_usage_trend, get_by_model, get_recent
+from .stats import ALLOWED_BUCKET_MINUTES, get_summary, get_usage_trend, get_by_model, get_recent
 
 router = APIRouter()
 
@@ -13,6 +13,11 @@ async def api_summary(request: Request, hours: int | None = None, since: str | N
 
 @router.get("/api/stats/usage")
 async def api_usage(request: Request, hours: int | None = None, bucket: int = 60, since: str | None = None, until: str | None = None):
+    if bucket not in ALLOWED_BUCKET_MINUTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"bucket must be one of {sorted(ALLOWED_BUCKET_MINUTES)}",
+        )
     return await get_usage_trend(request.app.state.db, hours, bucket, since, until)
 
 

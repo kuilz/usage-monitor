@@ -4,6 +4,7 @@ from enum import Enum, auto
 import aiosqlite
 import httpx
 from fastapi import APIRouter, Request, Response
+from fastapi.responses import JSONResponse
 from fastapi.responses import StreamingResponse
 
 from .config import settings
@@ -49,8 +50,16 @@ async def proxy_messages(request: Request):
         body_json = json.loads(body)
         original_is_streaming = body_json.get("stream", False)
     except (json.JSONDecodeError, AttributeError):
-        body_json = {}
-        original_is_streaming = False
+        return JSONResponse(
+            status_code=400,
+            content={
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "Request body must be valid JSON.",
+                },
+            },
+        )
 
     # 强制使用流式请求以获取准确的 usage 数据
     # （部分上游提供商的非流式接口返回不准确的 token 统计）

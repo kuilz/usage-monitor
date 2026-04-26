@@ -2,16 +2,36 @@ import aiosqlite
 from datetime import datetime, timedelta, timezone
 
 
+ALLOWED_BUCKET_MINUTES = {5, 30, 1440}
+
+
+def _normalize_bucket_minutes(bucket_minutes: int) -> int:
+    return bucket_minutes if bucket_minutes in ALLOWED_BUCKET_MINUTES else 60
+
+
+def _normalize_timestamp(value: str) -> str:
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _parse_time_slot(slot: str, bucket_minutes: int) -> datetime:
+    if bucket_minutes >= 1440:
+        return datetime.fromisoformat(slot).replace(tzinfo=timezone.utc)
+    return datetime.fromisoformat(slot).replace(tzinfo=timezone.utc)
+
+
 async def get_summary(db: aiosqlite.Connection, hours: int | None = None, since: str | None = None, until: str | None = None) -> dict:
     """Get overall and period stats."""
     where = ""
     params: list = []
     if since:
         where = "WHERE created_at >= ?"
-        params = [since]
+        params = [_normalize_timestamp(since)]
         if until:
             where += " AND created_at < ?"
-            params.append(until)
+            params.append(_normalize_timestamp(until))
     elif hours:
         where = f"WHERE created_at >= datetime('now', '-{hours} hours', 'utc')"
 
@@ -43,14 +63,15 @@ async def get_usage_trend(
     since: str | None = None,
     until: str | None = None,
 ) -> list[dict]:
+    bucket_minutes = _normalize_bucket_minutes(bucket_minutes)
     where = ""
     params: list = []
     if since:
         where = "WHERE created_at >= ?"
-        params = [since]
+        params = [_normalize_timestamp(since)]
         if until:
             where += " AND created_at < ?"
-            params.append(until)
+            params.append(_normalize_timestamp(until))
     elif hours:
         where = f"WHERE created_at >= datetime('now', '-{hours} hours', 'utc')"
 
@@ -95,10 +116,7 @@ async def get_usage_trend(
         start = now - timedelta(hours=hours)
     elif data:
         first_key = min(data.keys())
-        fmt = "%Y-%m-%d" if bucket_minutes >= 1440 else "%Y-%m-%dT%H:%M:%S"
-        start = datetime.strptime(first_key[: len(first_key.rstrip("0:"))], fmt).replace(
-            tzinfo=timezone.utc
-        )
+        start = _parse_time_slot(first_key, bucket_minutes)
     else:
         start = now
 
@@ -110,20 +128,17 @@ async def get_usage_trend(
         end = ref.replace(hour=0, minute=0, second=0, microsecond=0)
         if until:
             end -= timedelta(days=1)
-        fmt_slot = "%Y-%m-%d"
     elif bucket_minutes < 60:
         bucket = max(1, bucket_minutes)
         start = start.replace(minute=(start.minute // bucket) * bucket, second=0, microsecond=0)
         end = ref.replace(minute=(ref.minute // bucket) * bucket, second=0, microsecond=0)
         if until:
             end -= timedelta(minutes=bucket)
-        fmt_slot = "%Y-%m-%dT%H:" + f"{0:02d}:00"  # placeholder
     else:
         start = start.replace(minute=0, second=0, microsecond=0)
         end = ref.replace(minute=0, second=0, microsecond=0)
         if until:
             end -= timedelta(hours=1)
-        fmt_slot = "%Y-%m-%dT%H:00:00"
 
     result = []
     current = start
@@ -152,10 +167,10 @@ async def get_by_model(db: aiosqlite.Connection, hours: int | None = None, since
     params: list = []
     if since:
         where = "WHERE created_at >= ?"
-        params = [since]
+        params = [_normalize_timestamp(since)]
         if until:
             where += " AND created_at < ?"
-            params.append(until)
+            params.append(_normalize_timestamp(until))
     elif hours:
         where = f"WHERE created_at >= datetime('now', '-{hours} hours', 'utc')"
 

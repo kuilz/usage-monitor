@@ -147,24 +147,30 @@ class TestE2EEdgeCases:
 
     @respx.mock
     async def test_request_with_invalid_json_body(self, e2e_client):
-        """Client sends invalid JSON body — should still attempt the request."""
-        client, db = e2e_client
-
-        respx.post(UPSTREAM_URL).mock(
-            return_value=Response(
-                200,
-                content=_make_sse_stream("recovery", message_id="msg_inv").encode(),
-                headers={"content-type": "text/event-stream"},
-            )
-        )
+        """Client sends invalid JSON body — proxy should reject it."""
+        client, _db = e2e_client
 
         resp = await client.post(
             "/v1/messages",
             content=b"not json at all",
             headers={"content-type": "application/json"},
         )
-        # The proxy tries to parse the body, fails, falls back to non-streaming
-        assert resp.status_code == 200
+        assert resp.status_code == 400
+        assert resp.json() == {
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": "Request body must be valid JSON.",
+            },
+        }
+
+    async def test_usage_api_rejects_unsupported_bucket(self, e2e_client):
+        client, _db = e2e_client
+
+        resp = await client.get("/api/stats/usage?bucket=120")
+
+        assert resp.status_code == 400
+        assert "bucket must be one of" in resp.json()["detail"]
 
     @respx.mock
     async def test_multiple_requests_same_model(self, e2e_client):

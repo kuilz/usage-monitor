@@ -1,5 +1,9 @@
 import aiosqlite
+import logging
 from pathlib import Path
+
+
+logger = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS requests (
@@ -65,4 +69,4 @@ async def save_request(
         await db.commit()
     except Exception:
         # Best-effort: never block the proxy response
-        pass
+        logger.exception("Failed to save request usage record")
